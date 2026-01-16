@@ -1,0 +1,380 @@
+' ------------------------------
+' CurrentYearASPFormatting_for_PA
+' Paste parts 1..5 in order into a standard module
+' ------------------------------
+Sub CurrentYearASPFormatting_for_PA()
+    Dim ws As Worksheet
+    Dim sht As Worksheet
+    Dim col As Long, r As Long
+    Dim lastCol As Long, lastRow As Long
+    Dim col20 As Long
+
+    ' Load dictionaries from the ASP_Codes sheet
+    Call LoadDictionariesFromSheet
+
+    ' Ensure dictionaries were loaded
+    If Not (IsObject(stateCodes) And IsObject(suiCodes) And IsObject(taxBlockRules) And IsObject(stateLocalCodes)) Then
+        MsgBox "Dictionaries not loaded. Make sure ASP_Codes sheet exists and has the expected headers.", vbCritical
+        Exit Sub
+    End If
+
+    ' Process all selected sheets
+    For Each sht In ActiveWindow.SelectedSheets
+        Set ws = sht
+        ws.Activate
+
+        ' Unhide / unfreeze
+        On Error Resume Next
+        ws.Rows.Hidden = False
+        ws.Columns.Hidden = False
+        If Application.ActiveWindow.FreezePanes Then Application.ActiveWindow.FreezePanes = False
+        On Error GoTo 0
+
+        ' Find column containing "20" in row 3 — we'll treat everything left of it specially
+        lastCol = ws.Cells(3, ws.Columns.Count).End(xlToLeft).Column
+        col20 = 0
+        For col = 1 To lastCol
+            If Trim(ws.Cells(3, col).Value) = "20" Then
+                col20 = col
+                Exit For
+            End If
+        Next col
+        If col20 = 0 Then
+            MsgBox "Could not find a cell containing '20' in row 3 on sheet '" & ws.Name & "'. Aborting sheet.", vbExclamation
+            GoTo NextSheet
+        End If
+        ' --- Column D: convert dates starting at row 7 to MMDD.YY decimal ---
+        lastRow = ws.Cells(ws.Rows.Count, "D").End(xlUp).Row
+        If lastRow < 7 Then lastRow = 7
+        For r = 7 To lastRow
+            If Trim(ws.Cells(r, "D").Value) <> "" Then
+                Dim converted As Double
+                converted = ConvertDateToDecimal(ws.Cells(r, "D").Value)
+                If converted <> 0 Then
+                    ' format as number: e.g. 101.25 for Jan 1, 2025 -> MMDD.YY where month drops leading 0
+                    ws.Cells(r, "D").Value = converted
+                    ws.Cells(r, "D").NumberFormat = "0.00"
+                End If
+            End If
+        Next r
+
+        ' --- Column E: sequence numbers -> 1 -> 0.01, 2 -> 0.02, etc. (from row 7) ---
+        lastRow = ws.Cells(ws.Rows.Count, "E").End(xlUp).Row
+        If lastRow < 7 Then lastRow = 7
+        For r = 7 To lastRow
+            If Trim(ws.Cells(r, "E").Value) <> "" And IsNumeric(ws.Cells(r, "E").Value) Then
+                ws.Cells(r, "E").Value = CDbl(ws.Cells(r, "E").Value) / 100
+                ws.Cells(r, "E").NumberFormat = "0.00"
+            End If
+        Next r
+
+        ' --- Column F: quarter numbers same as Column E ---
+        lastRow = ws.Cells(ws.Rows.Count, "F").End(xlUp).Row
+        If lastRow < 7 Then lastRow = 7
+        For r = 7 To lastRow
+            If Trim(ws.Cells(r, "F").Value) <> "" And IsNumeric(ws.Cells(r, "F").Value) Then
+                ws.Cells(r, "F").Value = CDbl(ws.Cells(r, "F").Value) / 100
+                ws.Cells(r, "F").NumberFormat = "0.00"
+            End If
+        Next r
+        ' --- Capitalize-only for S, 19, Hours, Earnings in row 3 (left of col20) ---
+        For col = 1 To col20 - 1
+            Dim headerText As String
+            headerText = Trim(ws.Cells(3, col).Value)
+            If headerText <> "" Then
+                ' S* and 19* patterns
+                If headerText Like "S *" Or headerText Like "S?" Or headerText Like "19 *" Or headerText Like "19?" Then
+                    ws.Cells(3, col).Value = UCase(headerText)
+                End If
+                ' Hours / Earnings textual headers — if present, just capitalize
+                If InStr(1, headerText, "hours", vbTextCompare) > 0 Or InStr(1, headerText, "earnings", vbTextCompare) > 0 Then
+                    ws.Cells(3, col).Value = UCase(headerText)
+                End If
+            End If
+        Next col
+        ' --- State / SUI and numeric conversions & Tax Block Add/Cancel ---
+        lastCol = ws.Cells(3, ws.Columns.Count).End(xlToLeft).Column
+
+        For col = 1 To col20 - 1
+            Dim colCode As String
+            colCode = Trim(ws.Cells(3, col).Value)
+
+            ' If this column code is in stateLocalCodes (list), treat as state/local: multiply numeric by .01 or map abbreviation
+            If stateLocalCodes.exists(colCode) Then
+                lastRow = ws.Cells(ws.Rows.Count, col).End(xlUp).Row
+                If lastRow < 7 Then GoTo SkipStateLocal
+                For r = 7 To lastRow
+                    Dim v As Variant
+                    v = ws.Cells(r, col).Value
+                    If IsNumeric(v) Then
+                        ws.Cells(r, col).Value = CDbl(v) * 0.01
+                        ws.Cells(r, col).NumberFormat = "0.00"
+                    ElseIf Len(Trim(v)) > 0 Then
+                        If stateCodes.exists(UCase(Trim(v))) Then
+                            ws.Cells(r, col).Value = stateCodes(UCase(Trim(v)))
+                        End If
+                    End If
+                Next r
+            End If
+SkipStateLocal:
+
+            ' If this column code is in suiCodes dict, treat similarly but using suiCodes mapping
+            If suiCodes.exists(colCode) Then
+                lastRow = ws.Cells(ws.Rows.Count, col).End(xlUp).Row
+                If lastRow < 7 Then GoTo SkipSUI
+                For r = 7 To lastRow
+                    v = ws.Cells(r, col).Value
+                    If IsNumeric(v) Then
+                        ws.Cells(r, col).Value = CDbl(v) * 0.01
+                        ws.Cells(r, col).NumberFormat = "0.00"
+                    ElseIf Len(Trim(v)) > 0 Then
+                        If suiCodes.exists(UCase(Trim(v))) Then
+                            ws.Cells(r, col).Value = suiCodes(UCase(Trim(v)))
+                        End If
+                    End If
+                Next r
+            End If
+SkipSUI:
+
+            ' Tax Block Add/Cancel rules:
+            ' If header (colCode) exists in taxBlockRules, it should return an array or "AddChar|CancelChar" string.
+            If taxBlockRules.exists(colCode) Then
+                Dim tbRule As Variant
+                tbRule = taxBlockRules(colCode)
+                lastRow = ws.Cells(ws.Rows.Count, col).End(xlUp).Row
+                If lastRow >= 7 Then
+                    For r = 7 To lastRow
+                        Dim actionText As String
+                        actionText = Trim(ws.Cells(r, col).Value)
+                        If StrComp(actionText, "Add", vbTextCompare) = 0 Then
+                            ' tbRule expected to be array: tbRule(0) = Add replacement
+                            ws.Cells(r, col).Value = tbRule(0)
+                        ElseIf StrComp(actionText, "Cancel", vbTextCompare) = 0 Then
+                            ws.Cells(r, col).Value = tbRule(1)
+                        End If
+                    Next r
+                End If
+            End If
+        Next col
+
+        ' --- Delete empty columns BEFORE col20 if empty from row 7 down, with exceptions ---
+        For col = col20 - 1 To 1 Step -1
+            Dim shouldDelete As Boolean
+            shouldDelete = False
+            If Application.WorksheetFunction.CountA(ws.Range(ws.Cells(7, col), ws.Cells(ws.Rows.Count, col))) = 0 Then
+                If Trim(ws.Cells(3, col).Value) <> "10" And Trim(ws.Cells(3, col).Value) <> "20" And _
+                   InStr(1, ws.Cells(4, col).Value, "Gross", vbTextCompare) = 0 And _
+                   InStr(1, ws.Cells(4, col).Value, "Net", vbTextCompare) = 0 Then
+                    shouldDelete = True
+                End If
+            End If
+            If shouldDelete Then
+                ws.Columns(col).Delete
+                ' adjust col20 because columns shifted left
+                col20 = col20 - 1
+            End If
+        Next col
+        ' --- Delete columns to the right of col20 (keep col20) ---
+        lastCol = ws.Cells(3, ws.Columns.Count).End(xlToLeft).Column
+        If col20 > 0 And col20 < lastCol Then
+            ws.Range(ws.Columns(col20 + 1), ws.Columns(lastCol)).Delete
+        End If
+
+        ' --- Delete all rows after last entry in column A (start checking at row 8) ---
+        lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+        If lastRow >= 8 And lastRow < ws.Rows.Count Then
+            ws.Rows(lastRow + 1 & ":" & ws.Rows.Count).Delete
+        End If
+
+        ' --- Delete header rows 1,2,4,5,6 (so final layout is row3 then row7+) ---
+        On Error Resume Next
+        ws.Rows("1:2").Delete
+        ws.Rows("4:6").Delete
+        On Error GoTo 0
+
+        ' --- Delete column B ---
+        On Error Resume Next
+        ws.Columns("B").Delete
+        On Error GoTo 0
+
+        ' --- Put a single space into A1 ---
+        ws.Range("A1").Value = " "
+
+        ' --- Convert Column C starting at row 4 to numeric format ---
+        Dim lastC As Long
+        lastC = ws.Cells(ws.Rows.Count, "C").End(xlUp).Row
+        If lastC >= 4 Then
+            With ws.Range("C4:C" & lastC)
+                .NumberFormat = "0.00"
+                .Value = .Value
+            End With
+        End If
+
+NextSheet:
+    Next sht
+
+    MsgBox "CurrentYearASPFormatting_for_PA complete.", vbInformation
+End Sub
+
+' ------------------------------
+' Helper: Load dictionaries from ASP_Codes sheet
+' Expected headers in row1 (case-insensitive):
+'   "Tax/Wage Block Codes" (not required)
+'   "State/Local Codes" (list of column codes)
+'   "State Abbreviation" | "State Numeric Code"  (pairs)
+'   "SUI Abbreviation" | "SUI Numeric Code"      (pairs)
+'   "Tax Block Code" | "Tax Block Add" | "Tax Block Cancel" (triples)
+' ------------------------------
+Public stateCodes As Object
+Public suiCodes As Object
+Public taxBlockRules As Object
+Public stateLocalCodes As Object
+
+Sub LoadDictionariesFromSheet()
+    Dim sh As Worksheet
+    Set sh = Nothing
+    On Error Resume Next
+    Set sh = ThisWorkbook.Sheets("ASP_Codes")
+    On Error GoTo 0
+    If sh Is Nothing Then
+        MsgBox "ASP_Codes sheet not found. Please create it with the expected headers.", vbCritical
+        Exit Sub
+    End If
+
+    Dim headerCol As Long, r As Long
+    Dim h As String
+    Dim lastRow As Long
+
+    Set stateCodes = CreateObject("Scripting.Dictionary")
+    Set suiCodes = CreateObject("Scripting.Dictionary")
+    Set taxBlockRules = CreateObject("Scripting.Dictionary")
+    Set stateLocalCodes = CreateObject("Scripting.Dictionary")
+
+    ' Find header positions by scanning row 1
+    Dim colHeader As Long
+    Dim posTaxWage As Long, posStateLocal As Long
+    Dim posStateAbbrev As Long, posStateNum As Long
+    Dim posSuiAbbrev As Long, posSuiNum As Long
+    Dim posTaxCode As Long, posTaxAdd As Long, posTaxCancel As Long
+
+    posTaxWage = 0: posStateLocal = 0
+    posStateAbbrev = 0: posStateNum = 0
+    posSuiAbbrev = 0: posSuiNum = 0
+    posTaxCode = 0: posTaxAdd = 0: posTaxCancel = 0
+
+    For colHeader = 1 To sh.Columns.Count
+        h = Trim(LCase(CStr(sh.Cells(1, colHeader).Value)))
+        If h = "" Then Exit For
+        Select Case h
+            Case "tax/wage block codes"
+                posTaxWage = colHeader
+            Case "state/local codes", "state local codes"
+                posStateLocal = colHeader
+            Case "state abbreviation", "state abbr", "state"
+                posStateAbbrev = colHeader
+            Case "state numeric code", "state numeric", "state code"
+                posStateNum = colHeader
+            Case "sui abbreviation", "sui abbr", "sui"
+                posSuiAbbrev = colHeader
+            Case "sui numeric code", "sui numeric", "sui code"
+                posSuiNum = colHeader
+            Case "tax block code", "tax block"
+                posTaxCode = colHeader
+            Case "tax block add", "tax add", "add"
+                posTaxAdd = colHeader
+            Case "tax block cancel", "tax cancel", "cancel"
+                posTaxCancel = colHeader
+        End Select
+    Next colHeader
+
+    ' Load state local codes (list of column codes like "45 2")
+    If posStateLocal > 0 Then
+        lastRow = sh.Cells(sh.Rows.Count, posStateLocal).End(xlUp).Row
+        For r = 2 To lastRow
+            If Trim(sh.Cells(r, posStateLocal).Value) <> "" Then
+                stateLocalCodes(Trim(sh.Cells(r, posStateLocal).Value)) = True
+            End If
+        Next r
+    End If
+
+    ' Load state abbreviations -> numeric
+    If posStateAbbrev > 0 And posStateNum > 0 Then
+        lastRow = sh.Cells(sh.Rows.Count, posStateAbbrev).End(xlUp).Row
+        For r = 2 To lastRow
+            If Trim(sh.Cells(r, posStateAbbrev).Value) <> "" And IsNumeric(sh.Cells(r, posStateNum).Value) Then
+                stateCodes(UCase(Trim(sh.Cells(r, posStateAbbrev).Value))) = sh.Cells(r, posStateNum).Value
+            End If
+        Next r
+    End If
+
+    ' Load SUI codes
+    If posSuiAbbrev > 0 And posSuiNum > 0 Then
+        lastRow = sh.Cells(sh.Rows.Count, posSuiAbbrev).End(xlUp).Row
+        For r = 2 To lastRow
+            If Trim(sh.Cells(r, posSuiAbbrev).Value) <> "" And IsNumeric(sh.Cells(r, posSuiNum).Value) Then
+                suiCodes(UCase(Trim(sh.Cells(r, posSuiAbbrev).Value))) = sh.Cells(r, posSuiNum).Value
+            End If
+        Next r
+    End If
+
+    ' Load Tax Block rules (expecting code + Add + Cancel in adjacent columns found earlier)
+    If posTaxCode > 0 And posTaxAdd > 0 And posTaxCancel > 0 Then
+        lastRow = sh.Cells(sh.Rows.Count, posTaxCode).End(xlUp).Row
+        For r = 2 To lastRow
+            Dim tcode As String, tadd As String, tcancel As String
+            tcode = Trim(sh.Cells(r, posTaxCode).Value)
+            tadd = Trim(sh.Cells(r, posTaxAdd).Value)
+            tcancel = Trim(sh.Cells(r, posTaxCancel).Value)
+            If tcode <> "" Then
+                Dim arr(1) As String
+                arr(0) = tadd
+                arr(1) = tcancel
+                taxBlockRules(tcode) = arr
+            End If
+        Next r
+    End If
+
+End Sub
+
+' ------------------------------
+' Helper: convert many date formats to MMDD.YY decimal (month without leading zero)
+' Accepts: "01012025", "010125", "01/01/2025", "1/1/25", "1/1/2025", etc.
+' Returns 0 on parse fail.
+' ------------------------------
+Private Function ConvertDateToDecimal(ByVal v As Variant) As Double
+    On Error GoTo ErrHandler
+    Dim s As String
+    s = Trim(CStr(v))
+    If s = "" Then
+        ConvertDateToDecimal = 0
+        Exit Function
+    End If
+
+    Dim dt As Date
+    If IsDate(s) Then
+        dt = CDate(s)
+    ElseIf Len(s) = 8 And IsNumeric(s) Then ' MMDDYYYY
+        Dim mm As Integer, dd As Integer, yyyy As Integer
+        mm = CInt(Left(s, 2))
+        dd = CInt(Mid(s, 3, 2))
+        yyyy = CInt(Right(s, 4))
+        dt = DateSerial(yyyy, mm, dd)
+    ElseIf Len(s) = 6 And IsNumeric(s) Then ' MMDDYY
+        mm = CInt(Left(s, 2))
+        dd = CInt(Mid(s, 3, 2))
+        yyyy = 2000 + CInt(Right(s, 2))
+        dt = DateSerial(yyyy, mm, dd)
+    ElseIf Len(s) >= 3 And InStr(s, "/") > 0 Then
+        dt = CDate(s)
+    Else
+        ' try to parse fallback
+        ConvertDateToDecimal = 0
+        Exit Function
+    End If
+
+    ConvertDateToDecimal = Month(dt) * 100 + Day(dt) + (Right(Year(dt), 2) / 100)
+    Exit Function
+ErrHandler:
+    ConvertDateToDecimal = 0
+End Function
+
